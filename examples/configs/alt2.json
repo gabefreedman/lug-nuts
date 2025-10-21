@@ -1,0 +1,43 @@
+{
+    "param_info": [
+{
+    "name": "x",
+    "lower": -1.0,
+    "upper": 3.0,
+    "transform": "identity",
+    "prior": "uniform"
+},
+{
+    "name": "y",
+    "lower": 1.0,
+    "upper": 300,
+    "transform": "log",
+    "prior": "uniform"
+},
+{
+    "name": "z",
+    "lower": 1e-3,
+    "upper": 1e-1,
+    "transform": "log",
+    "prior": "uniform_log"
+},
+{
+    "name": "w",
+    "lower": 1e-4,
+    "upper": 1e-1,
+    "transform": "log",
+    "prior": "uniform_log"
+},
+{
+    "name": "u",
+    "lower": 1.0,
+    "upper": 50.0,
+    "transform": "identity",
+    "prior": "uniform"
+}
+],
+"free_mask": [true, true, true, true, true],
+"fixed_vals": [null, null, null, null, null],
+"truths": [null, null, null, null, null],
+"ll_func": "rosenbrock"
+}

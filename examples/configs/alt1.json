@@ -1,0 +1,36 @@
+{
+    "param_info": [
+{
+    "name": "M",
+    "lower": 1e5,
+    "upper": 1e7,
+    "transform": "log",
+    "prior": "uniform_log"
+},
+{
+    "name": "alpha",
+    "lower": 0.01,
+    "upper": 2.0,
+    "transform": "identity",
+    "prior": "uniform"
+},
+{
+    "name": "beta",
+    "lower": 30.0,
+    "upper": 400.0,
+    "transform": "identity",
+    "prior": "uniform"
+},
+{
+    "name": "gamma",
+    "lower": 1e-5,
+    "upper": 1e-2,
+    "transform": "log",
+    "prior": "uniform_log"
+}
+],
+"free_mask": [true, true, true, true],
+"fixed_vals": [null, null, null, null],
+"truths": [1.0e6, 1.0, 100.0, 1e-3],
+"ll_func": "mixed_gaussian"
+}
