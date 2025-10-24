@@ -20,21 +20,15 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import h5py
+import numpyro
+from numpyro.distributions import Normal
+from numpyro.infer import MCMC, NUTS, init_to_value
 import configs.test_fns as tfs  # import test likelihoods and gradients
 
 import matplotlib.pyplot as plt
 
 jax.config.update("jax_enable_x64", True)
 
-# Try importing numpyro (preferred for automatic NUTS adapt). If not present, exit with an explanation.
-try:
-    import numpyro
-    from numpyro.distributions import Normal
-    from numpyro.infer import MCMC, NUTS, init_to_value
-
-    HAS_NUMPYRO = True
-except Exception:
-    HAS_NUMPYRO = False
 
 # --------------- Configure logging ---------------
 logging.basicConfig(
@@ -43,16 +37,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("n-params-nuts")
-
-# ----------------- User: model configuration -----------------
-# Example parameter configuration for n parameters. Replace with your actual model info.
-# Each entry:
-#  - name: string
-#  - lower: physical lower bound (float)
-#  - upper: physical upper bound (float)
-#  - transform: 'identity' or 'log'  (how we parametrize internally; 'log' means param will be represented via log(x))
-#  - prior: 'uniform' (uniform in x) or 'uniform_log' (uniform in log x)
-# Notes on transforms and jacobians are given in the big comment block below.
 
 DEFAULT_PARAM_INFO = [
     # Example: first parameter is MBH mass; we want to scale via log
@@ -73,16 +57,11 @@ DEFAULT_PARAM_INFO = [
     },
     # add more parameter entries as needed...
 ]
-
-# Which parameters are free (True) or fixed (False). If fixed, specify fixed_values array.
-# By default sample all:
 DEFAULT_FREE_MASK = [True] * len(DEFAULT_PARAM_INFO)
-DEFAULT_FIXED_VALUES = [None] * len(
-    DEFAULT_PARAM_INFO
-)  # fill with numbers for fixed params
-DEFAULT_PARAM_TRUTHS = [1e6, 0.5, 0.1]  # example true values for plotting
+DEFAULT_FIXED_VALUES = [None] * len(DEFAULT_PARAM_INFO)
+DEFAULT_PARAM_TRUTHS = [1e6, 0.5, 0.1]
 
-# ----------------- User: external likelihood functions -----------------
+# ----------------- External likelihood functions -----------------
 ll_funcs = {
     "mixed_gaussian": tfs.external_loglik_alt1,
     "rosenbrock": tfs.external_loglik_alt2,
@@ -93,44 +72,6 @@ grad_funcs = {
     "rosenbrock": tfs.external_grad_alt2,
     "corr_gaussian": tfs.external_grad_alt3,
 }
-
-# ----------------- Explanatory math (brief) -----------------
-# Coordinate transforms used here (per-parameter, scalar z --> x):
-#
-# Let z be an unconstrained real (R). We map z -> s := sigmoid(z) in (0,1).
-# 1) identity-bounded transform (maps z -> x in [L, U]):
-#    x = L + (U - L) * s(z), where s(z) = 1/(1+exp(-z))
-#    dx/dz = (U - L) * s * (1 - s)
-#    => log |dx/dz| = log(U-L) + log(s) + log(1 - s)
-#
-# 2) log transform (map z -> x in [L, U] but parametrize log-scale):
-#    u = log(L) + (log(U) - log(L)) * s(z)  # u in [log L, log U]
-#    x = exp(u)
-#    dx/dz = dx/du * du/ds * ds/dz
-#          = exp(u) * (log U - log L) * s * (1 - s)
-#          = x * (log U - log L) * s * (1 - s)
-#    => log |dx/dz| = log x + log(log U - log L) + log(s) + log(1 - s)
-#
-# Prior in 'x' space:
-#   if prior == 'uniform' over [L, U]:
-#       log p_x(x) = -log(U - L)
-#   if prior == 'uniform_log' (i.e., uniform in u = log x between log L and log U):
-#       p_x(x) = (1 / (log U - log L)) * (1 / x)
-#       log p_x(x) = -log(log U - log L) - log(x)
-#
-# Posterior in z space (after change of variables):
-#   log p(z | data) = log L(data | x(z)) + log p_x(x(z)) + sum_i log |dx_i/dz_i|
-# So the potential (negative log posterior) U(z) = -[loglik + log_prior_x + logabsdet]
-# The sampler samples z (unconstrained), and we transform to x for the likelihood.
-#
-# If some parameters are fixed, they are substituted after transforming the sampled subset back to full x.
-#
-# ----------------- External likelihood wrapper (USER must replace) -----------------
-# The user must supply these two functions that call their external package:
-#   external_loglik(p0, p1, ..., p_{n-1}) -> float  (log-likelihood)
-#   external_grad(p0, p1, ..., p_{n-1}) -> numpy array (shape (n,)) equal to d(loglik)/dparams
-#
-# For demonstration we provide a dummy gaussian log-likelihood and gradient. Replace these functions.
 
 
 def external_loglik_placeholder(*params: float) -> float:
@@ -159,11 +100,6 @@ def external_grad_placeholder(*params: float) -> np.ndarray:
     grad = -(p - true) / (sigma**2)  # derivative of -0.5 * sum((p-true)^2 / sigma^2)
     return grad
 
-
-# Bind the placeholders to names expected by this script.
-# Replace these assignments with imports/calls to your package that provide the two functions:
-# external_loglik = external_loglik_placeholder
-# external_grad = external_grad_placeholder
 
 # ----------------- Utility: mapping between z_free and full x -----------------
 
@@ -413,8 +349,7 @@ def make_potential_fn(
             else 0.0
         )
         log_posterior = ll + lp + logabs
-        U = -log_posterior
-        return U
+        return log_posterior
 
     return jax.jit(potential)
 
@@ -434,10 +369,10 @@ def make_numpyro_model(param_info, free_mask, fixed_values):
 
     def model():
         # Sample unconstrained free parameters with broad Normal prior
-        z = numpyro.sample("z", Normal(jnp.zeros(n_free), 1.0))
+        z = numpyro.sample("z", Normal(jnp.zeros(n_free), 10.0))
 
         # Register total log-density as a factor
-        numpyro.factor("likelihood_and_jac", -logdensity_fn(z))
+        numpyro.factor("likelihood_and_jac", logdensity_fn(z))
 
     return model
 
@@ -454,10 +389,6 @@ def run_numpyro_nuts(
     target_accept=0.8,
     hdf5_out="chains.h5",
 ):
-    if not HAS_NUMPYRO:
-        raise ImportError(
-            "NumPyro is not available. Install numpyro to run this script (preferred)."
-        )
 
     free_indices, index_in_free = make_index_maps(free_mask)
     m = len(free_indices)
@@ -594,9 +525,6 @@ def main(args):
         logger.info(f"Loading param config from {args.config}")
         with open(args.config, "r") as f:
             cfg = json.load(f)
-        # param_info = cfg.get("param_info", param_info)
-        # free_mask = cfg.get("free_mask", free_mask)
-        # fixed_values = cfg.get("fixed_values", fixed_values)
         external_loglik = ll_funcs[cfg.get("ll_func")]
         external_grad = grad_funcs[cfg.get("ll_func")]
         param_info = cfg.get("param_info")
@@ -604,9 +532,6 @@ def main(args):
         fixed_values = [None] * len(param_info)
         fixed_values = cfg.get("fixed_vals", fixed_values)
         truths = cfg.get("truths")
-        print(free_mask)
-        print(fixed_values)
-        print(truths)
 
     logger.info("Parameter info:")
     for i, p in enumerate(param_info):
@@ -615,13 +540,6 @@ def main(args):
                 transform={p.get('transform', 'identity')}, prior={p.get('prior', 'uniform')}, \
                 free={free_mask[i]}, fixed_value={fixed_values[i]}"
         )
-
-    if not HAS_NUMPYRO:
-        logger.error(
-            "NumPyro not installed. This script is written to use NumPyro's NUTS (preferred). \
-            Install numpyro and try again."
-        )
-        sys.exit(1)
 
     start = time.time()
     out = run_numpyro_nuts(
