@@ -10,11 +10,8 @@ NUTS inference for an n-parameter model with:
 """
 
 from typing import List, Dict, Any, Tuple
-import logging
-import argparse
 import json
-import sys
-import time
+import logging
 
 import numpy as np
 import jax
@@ -23,55 +20,6 @@ import h5py
 import numpyro
 from numpyro.distributions import Normal
 from numpyro.infer import MCMC, NUTS, init_to_value
-import configs.test_fns as tfs  # import test likelihoods and gradients
-
-import matplotlib.pyplot as plt
-
-jax.config.update("jax_enable_x64", True)
-
-
-# --------------- Configure logging ---------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("n-params-nuts")
-
-DEFAULT_PARAM_INFO = [
-    # Example: first parameter is MBH mass; we want to scale via log
-    {"name": "M", "lower": 1e5, "upper": 1e8, "transform": "log", "prior": "uniform"},
-    {
-        "name": "q",
-        "lower": 0.1,
-        "upper": 0.99,
-        "transform": "identity",
-        "prior": "uniform",
-    },
-    {
-        "name": "a",
-        "lower": 0.0,
-        "upper": 0.999,
-        "transform": "identity",
-        "prior": "uniform",
-    },
-    # add more parameter entries as needed...
-]
-DEFAULT_FREE_MASK = [True] * len(DEFAULT_PARAM_INFO)
-DEFAULT_FIXED_VALUES = [None] * len(DEFAULT_PARAM_INFO)
-DEFAULT_PARAM_TRUTHS = [1e6, 0.5, 0.1]
-
-# ----------------- External likelihood functions -----------------
-ll_funcs = {
-    "mixed_gaussian": tfs.external_loglik_alt1,
-    "rosenbrock": tfs.external_loglik_alt2,
-    "corr_gaussian": tfs.external_loglik_alt3,
-}
-grad_funcs = {
-    "mixed_gaussian": tfs.external_grad_alt1,
-    "rosenbrock": tfs.external_grad_alt2,
-    "corr_gaussian": tfs.external_grad_alt3,
-}
 
 
 def external_loglik_placeholder(*params: float) -> float:
@@ -101,7 +49,13 @@ def external_grad_placeholder(*params: float) -> np.ndarray:
     return grad
 
 
-# ----------------- Utility: mapping between z_free and full x -----------------
+# Set likelihood and gradient functions
+global external_loglik, external_grad
+external_loglik = external_loglik_placeholder
+external_grad = external_grad_placeholder
+
+
+# ----------------- Mapping between z_free and full x -----------------
 
 
 def make_index_maps(free_mask: List[bool]) -> Tuple[List[int], Dict[int, int]]:
@@ -194,7 +148,7 @@ def zfree_to_x_and_dx_dz(
 # pure-jitted JAX code and can be slower.
 
 
-def _make_host_call_loglik(x_full_jax: jnp.ndarray) -> jnp.ndarray:
+def _make_host_call_loglik(x_full_jax: jnp.ndarray, ll_fn) -> jnp.ndarray:
     """
     Use host_callback.call to invoke the python external_loglik function (which expects python scalars/arrays).
     Returns a jax scalar array (0-d).
@@ -203,13 +157,8 @@ def _make_host_call_loglik(x_full_jax: jnp.ndarray) -> jnp.ndarray:
     def _py_loglik(x_np):
         # x_np is a numpy array (host side)
         # external_loglik expects separate args, unpack them
-        try:
-            val = external_loglik(*x_np)
-            return np.array(val, dtype=np.float64)
-        except Exception:
-            # Throw a helpful message if external call fails
-            logger.exception("external_loglik call failed on host.")
-            raise
+        val = ll_fn(*x_np)
+        return np.array(val, dtype=np.float64)
 
     # result_shape must be a jax.ShapeDtypeStruct describing a scalar float64
     result_shape = jax.ShapeDtypeStruct((), jnp.float64)
@@ -218,7 +167,7 @@ def _make_host_call_loglik(x_full_jax: jnp.ndarray) -> jnp.ndarray:
     # return ret
 
 
-def _make_host_call_grad(x_full_jax: jnp.ndarray) -> jnp.ndarray:
+def _make_host_call_grad(x_full_jax: jnp.ndarray, grad_fn) -> jnp.ndarray:
     """
     Use host_callback.call to invoke the python external_grad function.
     Returns a jax array of shape (n,) with dtype float64.
@@ -226,24 +175,20 @@ def _make_host_call_grad(x_full_jax: jnp.ndarray) -> jnp.ndarray:
     n = x_full_jax.shape[0]
 
     def _py_grad(x_np):
-        try:
-            g = external_grad(*x_np)
-            g = np.asarray(g, dtype=np.float64)
-            if g.shape != (n,):
-                raise ValueError(
-                    f"external_grad returned shape {g.shape} but expected {(n,)}"
-                )
-            return g
-        except Exception:
-            logger.exception("external_grad call failed on host.")
-            raise
+        g = grad_fn(*x_np)
+        g = np.asarray(g, dtype=np.float64)
+        if g.shape != (n,):
+            raise ValueError(
+                f"external_grad returned shape {g.shape} but expected {(n,)}"
+            )
+        return g
 
     result_shape = jax.ShapeDtypeStruct((n,), jnp.float64)
     ret = jax.pure_callback(_py_grad, result_shape, x_full_jax)
     return jnp.asarray(ret)
 
 
-def make_loglik_of_z(param_info, free_mask, fixed_values):
+def make_loglik_of_z(param_info, free_mask, fixed_values, ll_fn, grad_fn):
     @jax.custom_vjp
     def loglik_of_z(z_free: jnp.ndarray) -> jnp.ndarray:
         """
@@ -256,14 +201,14 @@ def make_loglik_of_z(param_info, free_mask, fixed_values):
             z_free, param_info, free_mask, fixed_values
         )
         # call host-side loglik
-        ll = _make_host_call_loglik(x_full)
+        ll = _make_host_call_loglik(x_full, ll_fn)
         return ll
 
     def loglik_of_z_fwd(z_free):
         x_full, dx_dz_free = zfree_to_x_and_dx_dz(
             z_free, param_info, free_mask, fixed_values
         )
-        ll = _make_host_call_loglik(x_full)
+        ll = _make_host_call_loglik(x_full, ll_fn)
         # Save x_full and dx_dz_free for the backward pass (needed to compute grad)
         return ll, (x_full, dx_dz_free)
 
@@ -275,7 +220,7 @@ def make_loglik_of_z(param_info, free_mask, fixed_values):
         (grad_z_free, None, None, None)  # the latter Nones correspond to (param_info, free_mask, fixed_vals)
         """
         x_full, dx_dz_free = res
-        grad_x = _make_host_call_grad(x_full)  # shape (n,)
+        grad_x = _make_host_call_grad(x_full, grad_fn)  # shape (n,)
         # Extract grad_x entries corresponding to free params only:
         # Make a mask vector of booleans for free params
         # NOTE: free_mask is a python list; convert to jax bool array
@@ -323,13 +268,17 @@ def log_prior_x(x_full: jnp.ndarray, param_info: List[Dict[str, Any]]) -> jnp.nd
 
 # ----------------- Potential function U(z_free) -----------------
 def make_potential_fn(
-    param_info: List[Dict[str, Any]], free_mask: List[bool], fixed_values: List[Any]
+    param_info: List[Dict[str, Any]],
+    free_mask: List[bool],
+    fixed_values: List[Any],
+    ll_fn,
+    grad_fn,
 ):
     """
     Return a JAX-callable potential_fn(z_free) that returns the scalar potential U(z_free) = -log posterior(z_free).
     Uses the loglik_of_z custom-vjp wrapper which will call external_loglik and external_grad as needed.
     """
-    loglik_of_z = make_loglik_of_z(param_info, free_mask, fixed_values)
+    loglik_of_z = make_loglik_of_z(param_info, free_mask, fixed_values, ll_fn, grad_fn)
 
     def potential(z_free: jnp.ndarray) -> jnp.ndarray:
         # z_free is shape (m,)
@@ -354,7 +303,7 @@ def make_potential_fn(
     return jax.jit(potential)
 
 
-def make_numpyro_model(param_info, free_mask, fixed_values):
+def make_numpyro_model(param_info, free_mask, fixed_values, ll_fn, grad_fn):
     """
     Returns a NumPyro model function that samples unconstrained free parameters
     and adds the custom log-density (likelihood + Jacobian from transformations).
@@ -365,7 +314,9 @@ def make_numpyro_model(param_info, free_mask, fixed_values):
         fixed_values: list of values for fixed parameters
     """
     n_free = sum(free_mask)
-    logdensity_fn = make_potential_fn(param_info, free_mask, fixed_values)
+    logdensity_fn = make_potential_fn(
+        param_info, free_mask, fixed_values, ll_fn, grad_fn
+    )
 
     def model():
         # Sample unconstrained free parameters with broad Normal prior
@@ -382,29 +333,25 @@ def run_numpyro_nuts(
     param_info,
     free_mask,
     fixed_values,
+    ll_fn,
+    grad_fn,
     num_warmup=1000,
     num_samples=2000,
     num_chains=1,
     rng_seed=0,
     target_accept=0.8,
     hdf5_out="chains.h5",
+    logger=logging.getLogger(__name__),
 ):
 
     free_indices, index_in_free = make_index_maps(free_mask)
     m = len(free_indices)
     n = len(param_info)
 
-    logger.info(
-        f"Model has n={n} parameters, sampling m={m} free parameters, using NumPyro NUTS."
-    )
-    logger.info("Building potential function (JAX-jitted).")
+    logger.info(f"Model has n={n} parameters, sampling m={m} free parameters")
 
-    # potential_fn = make_potential_fn(param_info, free_mask, fixed_values)
-
-    # initial positions: use midpoint of bounds transformed back to z-space via inverse of our transform:
+    # initial positions
     def initial_z_free_guess():
-        # For each free parameter, pick s0 = 0.5 -> z0 = logit(0.5) = 0.0
-        # This maps to midpoint; we can optionally pick random init around 0
         z0 = jnp.zeros((m,), dtype=jnp.float64)
         return np.asarray(z0)
 
@@ -412,15 +359,12 @@ def run_numpyro_nuts(
     init_strategy = init_to_value(values={"z": init_z})
     rng_key = jax.random.PRNGKey(rng_seed)
 
-    model_fn = make_numpyro_model(param_info, free_mask, fixed_values)
+    model_fn = make_numpyro_model(param_info, free_mask, fixed_values, ll_fn, grad_fn)
 
     # Build NUTS kernel using potential_fn
     kernel = NUTS(
-        model_fn,
-        init_strategy=init_strategy,
-        target_accept_prob=target_accept,
-        adapt_mass_matrix=True,
-    )  # argument name depends on numpyro version
+        model_fn, init_strategy=init_strategy, target_accept_prob=target_accept
+    )
     mcmc = MCMC(
         kernel,
         num_warmup=num_warmup,
@@ -429,18 +373,7 @@ def run_numpyro_nuts(
         progress_bar=True,
     )
 
-    # NumPyro's MCMC.run expects model args normally; when using potential_fn directly, there are no args.
-    # We pass initial values using init_params kwarg if supported. To keep compatibility across versions,
-    # we pass run(...) without args and rely on the kernel to initialize from the provided init strategy.
-    # Many versions of NumPyro accept "init_params" or automatically init from a jittered position.
-    # For robustness, we set the 'initial_params' attribute via mcmc.run(..., init_params=...) if available.
-    try:
-        logger.info("Starting MCMC (this may take a while).")
-        # Some NumPyro versions accept init_params as keyword argument. Try to pass that.
-        mcmc.run(rng_key)
-    except TypeError:
-        # fallback: run without init_params
-        mcmc.run(rng_key)
+    mcmc.run(rng_key)
 
     # Extract samples: depending on how the kernel stores positions,
     # we either get samples by name or via mcmc.get_samples()
@@ -452,14 +385,10 @@ def run_numpyro_nuts(
         arr = np.asarray(val)
         if arr.ndim == 3 and arr.shape[-1] == m:
             z_samples = arr
-            logger.info(f"Using samples from key '{key}' as z_free samples.")
             break
         # fallback: if m==1 maybe shape (chains, samples) -> expand dim
         if m == 1 and arr.ndim == 2:
             z_samples = np.expand_dims(arr, -1)
-            logger.info(
-                f"Using samples from key '{key}' (2D) as single-dim z_free samples."
-            )
             break
 
     if z_samples is None:
@@ -469,7 +398,7 @@ def run_numpyro_nuts(
             + ", ".join(samples.keys())
         )
         raise RuntimeError(
-            "Unable to extract z_free samples from NumPyro MCMC output. Check numpyro version or kernel usage."
+            "Unable to extract z_free samples from MCMC output. Check numpyro version or kernel usage."
         )
 
     chains, samples_count, _ = z_samples.shape
@@ -482,7 +411,6 @@ def run_numpyro_nuts(
         "Transforming z_free samples to physical parameter space and saving to HDF5."
     )
 
-    # We'll iterate and reconstruct x for each chain/sample (could be vectorized, but keep simple and memory-friendly)
     with h5py.File(hdf5_out, "w") as hf:
         hf.attrs["n_params"] = n
         hf.attrs["param_info_json"] = json.dumps(param_info)
@@ -504,97 +432,3 @@ def run_numpyro_nuts(
         logger.info(f"Saved samples to {hdf5_out} (dataset 'x_samples').")
     logger.info("Done.")
     return hdf5_out
-
-
-# ----------------- Main: parse CLI args and run -----------------
-def main(args):
-
-    logger.setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
-
-    # Set likelihood and gradient functions
-    global external_loglik, external_grad
-    external_loglik = external_loglik_placeholder
-    external_grad = external_grad_placeholder
-
-    param_info = DEFAULT_PARAM_INFO.copy()
-    free_mask = DEFAULT_FREE_MASK.copy()
-    fixed_values = DEFAULT_FIXED_VALUES.copy()
-    truths = DEFAULT_PARAM_TRUTHS.copy()
-
-    if args.config is not None:
-        logger.info(f"Loading param config from {args.config}")
-        with open(args.config, "r") as f:
-            cfg = json.load(f)
-        external_loglik = ll_funcs[cfg.get("ll_func")]
-        external_grad = grad_funcs[cfg.get("ll_func")]
-        param_info = cfg.get("param_info")
-        free_mask = cfg.get("free_mask")
-        fixed_values = [None] * len(param_info)
-        fixed_values = cfg.get("fixed_vals", fixed_values)
-        truths = cfg.get("truths")
-
-    logger.info("Parameter info:")
-    for i, p in enumerate(param_info):
-        logger.info(
-            f"  {i}: name={p['name']}, bounds=[{p['lower']}, {p['upper']}], \
-                transform={p.get('transform', 'identity')}, prior={p.get('prior', 'uniform')}, \
-                free={free_mask[i]}, fixed_value={fixed_values[i]}"
-        )
-
-    start = time.time()
-    out = run_numpyro_nuts(
-        param_info=param_info,
-        free_mask=free_mask,
-        fixed_values=fixed_values,
-        num_warmup=args.num_warmup,
-        num_samples=args.num_samples,
-        num_chains=args.num_chains,
-        rng_seed=args.seed,
-        target_accept=0.8,
-        hdf5_out=args.out,
-    )
-    duration = time.time() - start
-    logger.info(f"Finished sampling. Output file: {out}. Took {duration:.1f} seconds.")
-
-    # Load samples and make a quick plot
-    with h5py.File(out, "r") as hf:
-        samples = hf["x_samples"][:]  # shape (chains, samples, n)
-    chains, samples_count, n = samples.shape
-    flat = samples.reshape(-1, n)
-
-    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4))
-    for i in range(n):
-        ax = axes[i] if n > 1 else axes
-        ax.hist(flat[:, i], bins=50, density=True, alpha=0.7)
-        if truths[i] is not None:
-            ax.axvline(truths[i], color="r", linestyle="--", label="true")
-        ax.set_title(f"Posterior for {param_info[i]['name']}")
-        ax.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="NUTS sampling for n-parameter model with fixed uniform priors and optional transforms."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="JSON file with parameter config (overrides DEFAULT_PARAM_INFO).",
-    )
-    parser.add_argument("--num-warmup", type=int, default=1000)
-    parser.add_argument("--num-samples", type=int, default=1000)
-    parser.add_argument("--num-chains", type=int, default=1)
-    parser.add_argument(
-        "--out",
-        type=str,
-        default="chains.h5",
-        help="HDF5 file to write posterior samples (full x space).",
-    )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--log-level", type=str, default="INFO")
-    args = parser.parse_args()
-
-    main(args)
