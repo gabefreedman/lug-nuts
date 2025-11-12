@@ -344,7 +344,7 @@ def run_numpyro_nuts(
     logger=logging.getLogger(__name__),
 ):
 
-    free_indices, index_in_free = make_index_maps(free_mask)
+    free_indices, _ = make_index_maps(free_mask)
     m = len(free_indices)
     n = len(param_info)
 
