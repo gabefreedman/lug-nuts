@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages]
+find = {where = ["src"]}
+
+[tool.setuptools.dynamic]
+version = {attr="lugnuts.__version__"}
+
+[project]
+name = "lugnuts"
+authors = [{name = "Gabe Freedman", email = "gabriel.freedman@nasa.gov"}]
+description = "Plug and play wrapper for numpyro NUTS routine with custom likelihoods"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3"
+]
+dynamic = ["version"]
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "jax[cpu]",
+    "jaxlib",
+    "h5py",
+    "numpyro"
+]
+
+[project.optional-dependencies]
+
+dev = [
+    "black",
+    "flake8",
+    "flake8-pyprojecttoml"
+]
+
+gpu = [
+    "jax[cuda12]"
+]
+
+[tool.flake8]
+max-line-length = 120
+exclude = [
+    "__pycache__",
+    ".git",
+    ".ipynb_checkpoints",
+    ".tox",
+    ".venv",
+    "build",
+    "dist",
+    "docs",
+    "venv"
+]
