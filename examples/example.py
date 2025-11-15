@@ -101,8 +101,8 @@ def main(args):
         logger.info(f"Loading param config from {args.config}")
         with open(args.config, "r") as f:
             config = json.load(f)
-        external_loglike = ll_funcs[config.get("ll_fn")]
-        external_grad = grad_funcs[config.get("ll_fn")]
+        external_loglike = ll_funcs[config.get("ll_func")]
+        external_grad = grad_funcs[config.get("ll_func")]
         param_info = config.get("param_info")
         free_mask = config.get("free_mask")
         fixed_values = [None] * len(param_info)
@@ -145,9 +145,9 @@ def main(args):
         fig, axes = plt.subplots(1, n_params, figsize=(5 * n_params, 4))
         for i in range(n_params):
             ax = axes[i] if n_params > 1 else axes
-            ax.hist(flat[:, i], bins=25, density=True, alpha=0.7)
+            ax.hist(flat[:, i], bins=25, density=True, histtype="step", lw=3)
             if truths[i] is not None:
-                ax.axvline(truths[i], color="black", linestyle="--")
+                ax.axvline(truths[i], color="black", linestyle="--", lw=3)
             ax.set_xlabel(param_info[i]["name"], fontsize=16)
             ax.legend()
         plt.tight_layout()

@@ -103,7 +103,7 @@ def z_to_x_and_dx_dz(
                 diff = log_up - log_lw
                 u = log_lw + diff * s  # u in [log L, log U]
                 x = 10**u
-                dx_dz = x * diff * s * (1.0 - s)
+                dx_dz = x * jnp.log(10) * diff * s * (1.0 - s)
             else:
                 raise ValueError(
                     f"Undefined transform '{transform}' for parameter {param['name']}."
@@ -250,7 +250,9 @@ def log_prior_x(x_vec: jnp.ndarray, param_info: List[Dict[str, Any]]) -> jnp.nda
             logprs.append(-jnp.log10(upper - lower))
         elif prior_type == "uniform_log":
             logprs.append(
-                -jnp.log10(jnp.log10(upper) - jnp.log10(lower)) - jnp.log10(x_i)
+                -jnp.log(jnp.log(upper) - jnp.log(lower))
+                - jnp.log(x_i)
+                - jnp.log(jnp.log(10))
             )
         else:
             raise ValueError(
