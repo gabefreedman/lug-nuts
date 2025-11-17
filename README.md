@@ -16,7 +16,7 @@ pip install https://www.github.com/gabefreedman/lug-nuts.git
 Model setup is run through a configuration file which can either be a Python dict defined in script or read from a .json file. It contains information such as the parameter names, prior bounds, prior type, optional transforms, and whether to hold a parameter fixed or let it vary. A sample configuration is shown below, and other examples are included under `examples/configs`. The custom likelihood function must be supplied within the script or imported. For the example configuration files the `ll_func` key references a predefined set of likelihood functions included with the examples.
 ```
 {
-    "param_info": [
+"param_info": [
 {
     "name": "A",
     "lower": 1e1,
