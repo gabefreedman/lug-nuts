@@ -126,7 +126,7 @@ def z_to_x_and_dx_dz(
 
 
 def _make_host_call_loglik(
-    x_vec: jnp.ndarray, ll_fn: Callable[..., float]
+    x_vec: jnp.ndarray, ll_fn: Callable[..., float], **kwargs
 ) -> jnp.ndarray:
     """Use JAX's pure_callback to invoke a host-side log-likelihood function.
 
@@ -143,7 +143,7 @@ def _make_host_call_loglik(
 
     def _loglike(x_np):
         # x_np is a numpy array
-        ll_val = ll_fn(*x_np)
+        ll_val = ll_fn(*x_np, **kwargs)
         return np.array(ll_val, dtype=np.float64)
 
     # Need to define the result shape, a jax.ShapeDtypeStruct describing a scalar float64
@@ -153,7 +153,7 @@ def _make_host_call_loglik(
 
 
 def _make_host_call_grad(
-    x_vec: jnp.ndarray, grad_fn: Callable[..., Sequence[float]]
+    x_vec: jnp.ndarray, grad_fn: Callable[..., Sequence[float]], **kwargs
 ) -> jnp.ndarray:
     """Use JAX's pure_callback to invoke a host-side log-likelihood gradient function.
 
@@ -168,7 +168,7 @@ def _make_host_call_grad(
     n_params = x_vec.shape[0]
 
     def _grad(x_np):
-        grd = grad_fn(*x_np)
+        grd = grad_fn(*x_np, **kwargs)
         grd = np.asarray(grd, dtype=np.float64)
         return grd
 
@@ -183,6 +183,7 @@ def make_loglike_z(
     fixed_values: List[Any],
     ll_fn: Callable[..., float],
     grad_fn: Callable[..., Sequence[float]],
+    **kwargs
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
     """Make a JAX-callable log-likelihood function defined on the unconstrained parameter space.
     The function comes with a custom VJP so that JAX can compute gradients.
@@ -197,23 +198,22 @@ def make_loglike_z(
     Returns:
         A version of the log-likelihood function that is differentiable through JAX.
     """
-
     @jax.custom_vjp
     def loglike_z(z_free: jnp.ndarray) -> jnp.ndarray:
         x_full, _ = z_to_x_and_dx_dz(z_free, param_info, free_mask, fixed_values)
-        ll = _make_host_call_loglik(x_full, ll_fn)
+        ll = _make_host_call_loglik(x_full, ll_fn, **kwargs)
         return ll
 
     def loglike_z_fwd(z_free):
         x_full, dx_dz_free = z_to_x_and_dx_dz(
             z_free, param_info, free_mask, fixed_values
         )
-        ll = _make_host_call_loglik(x_full, ll_fn)
+        ll = _make_host_call_loglik(x_full, ll_fn, **kwargs)
         return ll, (x_full, dx_dz_free)
 
     def loglike_z_bwd(res, g):
         x_vec, dx_dz = res
-        grad_x = _make_host_call_grad(x_vec, grad_fn)
+        grad_x = _make_host_call_grad(x_vec, grad_fn, **kwargs)
         free_inds, _ = make_index_maps(list(free_mask))
         grad_x = grad_x[jnp.array(free_inds, dtype=jnp.int32)]
         grad_z = g * (dx_dz * grad_x)
@@ -268,6 +268,7 @@ def make_potential_fn(
     fixed_values: List[Any],
     ll_fn: Callable[..., float],
     grad_fn: Callable[..., Sequence[float]],
+    **kwargs
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
     """Make the JAX-callable potential function for the model on the unconstrained
     parameter space for use in NUTS.
@@ -282,7 +283,7 @@ def make_potential_fn(
     Returns:
         A JAX-differentiable potential function for NUTS.
     """
-    loglike_of_z = make_loglike_z(param_info, free_mask, fixed_values, ll_fn, grad_fn)
+    loglike_of_z = make_loglike_z(param_info, free_mask, fixed_values, ll_fn, grad_fn, **kwargs)
 
     def potential(z_vec: jnp.ndarray) -> jnp.ndarray:
         x_full, dx_dz = z_to_x_and_dx_dz(z_vec, param_info, free_mask, fixed_values)
@@ -304,6 +305,7 @@ def make_numpyro_model(
     fixed_values: List[Any],
     ll_fn: Callable[..., float],
     grad_fn: Callable[..., Sequence[float]],
+    **kwargs
 ) -> Callable[[], None]:
     """Create a numpyro model for a given parameter space and likelihood/gradient functions.
 
@@ -319,7 +321,7 @@ def make_numpyro_model(
     """
     n_free = sum(free_mask)
     logdensity_fn = make_potential_fn(
-        param_info, free_mask, fixed_values, ll_fn, grad_fn
+        param_info, free_mask, fixed_values, ll_fn, grad_fn, **kwargs
     )
 
     def model():
@@ -342,6 +344,7 @@ def run_numpyro_nuts(
     seed: int = 1234,
     target_accept: float = 0.8,
     hdf5_out: str = "chains.h5",
+    **kwargs
 ) -> None:
     """Setup and run NUTS with numpyro and save results. Takes user-provided
     log-likelihood and log-likelihood gradient functions.
@@ -371,7 +374,7 @@ def run_numpyro_nuts(
     init_strategy = init_to_value(values={"z": z0})
     rng_key = jax.random.PRNGKey(seed)
 
-    model_fn = make_numpyro_model(param_info, free_mask, fixed_values, ll_fn, grad_fn)
+    model_fn = make_numpyro_model(param_info, free_mask, fixed_values, ll_fn, grad_fn, **kwargs)
 
     # Build NUTS kernel
     kernel = NUTS(
